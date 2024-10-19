@@ -2,51 +2,54 @@ import ray
 from ray.dag import InputNode
 from ray.experimental.channel.torch_tensor_type import TorchTensorType
 import torch
+from utils import (
+    PolicyInferenceModel,
+    ReferenceModel,
+    RewardModel,
+    policy_inference_input,
+    bytes_per_int64,
+    policy_inference_output,
+    reference_output,
+    reward_output,
+)
+import time
 
-@ray.remote(num_gpus=1)
-class PolicyInferenceModel:
-    def __init__(self):
-        pass
 
-    def forward_step(self, data):
-        return data
+if __name__ == "__main__":
+    ray.init()
 
-@ray.remote(num_gpus=1)
-class ReferenceModel:
-    def __init__(self):
-        pass
+    policy = PolicyInferenceModel.remote(policy_inference_output)
+    reference = ReferenceModel.remote(reference_output)
+    reward = RewardModel.remote(reward_output)
 
-    def forward_step(self, data):
-        return data
-    
-@ray.remote(num_gpus=1)
-class RewardModel:
-    def __init__(self):
-        pass
+    with InputNode() as input:
+        policy_output = policy.forward_step.bind(input)
+        policy_output.with_type_hint(TorchTensorType(transport=TorchTensorType.NCCL))
+        reference_output = reference.forward_step.bind(policy_output)
+        reference_output.with_type_hint(TorchTensorType(transport=TorchTensorType.NCCL))
+        reward_output = reward.forward_step.bind(policy_output, reference_output)
+    compiled_dag = reward_output.experimental_compile()
 
-    def forward_step(self, policy_data, reward_data):
-        return [policy_data, reward_data]
-    
-policy = PolicyInferenceModel.remote()
-reference = ReferenceModel.remote()
-reward = RewardModel.remote()
+    def make_experience(query):
+        return compiled_dag.execute(query)
 
-with InputNode() as input:
-    policy_output = policy.forward_step.bind(input)
-    policy_output.with_type_hint(TorchTensorType(transport=TorchTensorType.NCCL))
-    reference_output = reference.forward_step.bind(policy_output)
-    reference_output.with_type_hint(TorchTensorType(transport=TorchTensorType.NCCL))
-    reward_output = reward.forward_step.bind(policy_output, reference_output)
-compiled_dag = reward_output.experimental_compile()
+    def learn(input_data, num_episodes):
+        for _ in range(num_episodes):
+            ref = make_experience(input_data)
+            # Simulate the Policy trainer consumes the data
+            # TODO (kevin85421): https://github.com/ray-project/ray/issues/46440#issuecomment-2362415025
+            reward_output = ray.get(ref)
+            assert (
+                reward_output.numel() * reward_output.element_size()
+                == 160 * 1024 * 1024
+            )  # 160 MB
 
-def make_experience(query):
-    return compiled_dag.execute(query)
+    gpu_tensor = torch.zeros(
+        policy_inference_input // bytes_per_int64, dtype=torch.int64, device="cuda"
+    )
+    assert gpu_tensor.numel() * gpu_tensor.element_size() == 32 * 1024 * 1024  # 32 MB
 
-def learn(input_data, num_episodes, batch_per_episode):
-    for _ in range(num_episodes):
-        ref = make_experience(input_data)
-        # Simulate the Policy trainer consumes the data
-        print(ray.get(ref))
-
-gpu_tensor = torch.tensor([1.0, 2.0, 3.0], device='cuda')
-learn(gpu_tensor, 1, 1)
+    start_time = time.perf_counter()
+    learn(gpu_tensor, 100)
+    end_time = time.perf_counter()
+    print(f"Execution time: {end_time - start_time} seconds")

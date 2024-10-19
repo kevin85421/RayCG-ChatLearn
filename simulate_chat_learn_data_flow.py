@@ -1,35 +1,24 @@
 import ray
 import torch
+from utils import (
+    PolicyInferenceModel,
+    ReferenceModel,
+    RewardModel,
+    policy_inference_input,
+    bytes_per_int64,
+    policy_inference_output,
+    reference_output,
+    reward_output,
+)
+import time
 
-@ray.remote(num_gpus=1)
-class PolicyInferenceModel:
-    def __init__(self):
-        pass
 
-    def forward_step(self, data):
-        return data
-
-@ray.remote(num_gpus=1)
-class ReferenceModel:
-    def __init__(self):
-        pass
-
-    def forward_step(self, data):
-        return data
-    
-@ray.remote(num_gpus=1)
-class RewardModel:
-    def __init__(self):
-        pass
-
-    def forward_step(self, policy_data, reward_data):
-        return [policy_data, reward_data]
-    
 class Queue:
     """
     This is a simple replacement for `ray.util.queue.Queue` to simulate the
     data flow in ChatLearn.
     """
+
     def __init__(self):
         self.obj_ref = None
 
@@ -53,54 +42,75 @@ class Queue:
             data = data.cuda()
         return data
 
-policy = PolicyInferenceModel.remote()
-reference = ReferenceModel.remote()
-reward = RewardModel.remote()
 
-input_queue = Queue()
-output_queue = Queue()
+if __name__ == "__main__":
+    ray.init()
 
-policy_reference_queue = Queue()
-policy_reward_queue = Queue()
-reference_reward_queue = Queue()
+    policy = PolicyInferenceModel.remote(policy_inference_output)
+    reference = ReferenceModel.remote(reference_output)
+    reward = RewardModel.remote(reward_output)
 
-# Simulate the data flow
+    input_queue = Queue()
+    output_queue = Queue()
 
-def make_experience(query):
-    # Add `query` to the queue of the input model (i.e. policy model),
-    # and then `get` it. This is confusing, but you can check the
-    # implementation in: `Environment.setup_queues` (produce) and
-    # `generate_step_one_model_internal` (consume) for more details.
-    # Comment out the following two lines to avoid the confusion.
+    policy_reference_queue = Queue()
+    policy_reward_queue = Queue()
+    reference_reward_queue = Queue()
 
-    # input_queue.put(query)
-    # query = input_queue.get()
+    # Simulate the data flow
 
-    # Step 1: Policy inference
-    ref = policy.forward_step.remote(query)
-    for q in [policy_reference_queue, policy_reward_queue]:
-        q.put(ref)
+    def make_experience(query):
+        """
+        Simulate the data flow in ChatLearn. This function doesn't cover the
+        training part or the parameter synchronization between the Policy
+        Inference model and the Policy Trainer. It focuses only on the inference
+        of the Policy, Reference, and Reward models.
+        """
 
-    # Step 2: Reference model
-    policy_output = policy_reference_queue.get()
-    ref = reference.forward_step.remote(policy_output)
-    reference_reward_queue.put(ref)
+        # Add `query` to the queue of the input model (i.e. policy model),
+        # and then `get` it. This is confusing, but you can check the
+        # implementation in: `Environment.setup_queues` (produce) and
+        # `generate_step_one_model_internal` (consume) for more details.
+        # Comment out the following two lines to avoid the confusion.
 
-    # Step 3: Reward model
-    policy_output = policy_reward_queue.get()
-    reference_output = reference_reward_queue.get()
-    reward_output = reward.forward_step.remote(policy_output, reference_output)
-    output_queue.put(reward_output)
+        # input_queue.put(query)
+        # query = input_queue.get()
 
-    # Step 4: Consume by the dataloader for training
-    return output_queue
+        # Step 1: Policy inference
+        ref = policy.forward_step.remote(query)
+        for q in [policy_reference_queue, policy_reward_queue]:
+            q.put(ref)
 
-def learn(input_data, num_episodes, batch_per_episode):
-    for _ in range(num_episodes):
-        queue = make_experience(input_data)
-        # Simulate the Policy trainer consumes the data
-        print(queue.get())
+        # Step 2: Reference model
+        policy_output = policy_reference_queue.get()
+        ref = reference.forward_step.remote(policy_output)
+        reference_reward_queue.put(ref)
 
-gpu_tensor = torch.tensor([1.0, 2.0, 3.0], device='cuda')
+        # Step 3: Reward model
+        policy_output = policy_reward_queue.get()
+        reference_output = reference_reward_queue.get()
+        reward_output = reward.forward_step.remote(policy_output, reference_output)
+        output_queue.put(reward_output)
 
-learn(gpu_tensor, 1, 1)
+        # Step 4: Consume by the dataloader for training
+        return output_queue
+
+    def learn(input_data, num_episodes):
+        for _ in range(num_episodes):
+            queue = make_experience(input_data)
+            # Simulate the Policy trainer consumes the data
+            reward_output = queue.get()
+            assert (
+                reward_output.numel() * reward_output.element_size()
+                == 160 * 1024 * 1024
+            )  # 160 MB
+
+    gpu_tensor = torch.zeros(
+        policy_inference_input // bytes_per_int64, dtype=torch.int64, device="cuda"
+    )
+    assert gpu_tensor.numel() * gpu_tensor.element_size() == 32 * 1024 * 1024  # 32 MB
+
+    start_time = time.perf_counter()
+    learn(gpu_tensor, 100)
+    end_time = time.perf_counter()
+    print(f"Execution time: {end_time - start_time} seconds")
