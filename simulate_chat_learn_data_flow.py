@@ -62,7 +62,9 @@ def make_experience(query):
     return output_queue
 
 def learn(input_data, num_episodes, batch_per_episode):
-    for _ in num_episodes:
+    for _ in range(num_episodes):
         queue = make_experience(input_data)
         # Simulate the Policy trainer consumes the data
-        queue.get()
+        print(queue.get())
+
+learn("input_data", 1, 1)
