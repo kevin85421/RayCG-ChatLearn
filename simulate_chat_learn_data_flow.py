@@ -102,6 +102,5 @@ def learn(input_data, num_episodes, batch_per_episode):
         print(queue.get())
 
 gpu_tensor = torch.tensor([1.0, 2.0, 3.0], device='cuda')
-print(torch.cuda.is_available())
 
 learn(gpu_tensor, 1, 1)
