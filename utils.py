@@ -9,7 +9,7 @@ bytes_per_int64 = 8
 # the lower bound of data transfer.
 max_new_tokens = 0
 
-# Policy Inference input
+# Policy Inference input (32 MB)
 policy_inference_input = batch_size * prompt_seq_len * bytes_per_int64
 
 # Policy Inference output (96 MB)
